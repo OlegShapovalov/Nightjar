@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Nightjar
+Comment=Fast and Modern Dual-Pane File Manager
+Exec=nightjar
+Icon=nightjar
+Terminal=false
+Type=Application
+Categories=System;FileManager;Utility;
+Keywords=file;manager;commander;nightjar;
+StartupNotify=true

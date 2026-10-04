@@ -1,0 +1,1280 @@
+import QtQuick
+import QtQuick.Controls
+import QtQuick.Layouts
+
+Rectangle {
+    id: pane
+    property string currentPath: ""
+    property alias list: listView
+    property bool isActive: false
+    property string sortBy: "name"
+    property bool sortAsc: true
+    property string diskInfo: ""
+    property var rawItems: []
+    property string filterText: ""
+
+    property var fsManager
+    signal activated()
+    signal refreshRequested()
+
+    property bool isRmbDragging: false
+    property var rmbTouchedIndices: ({})
+
+    color: "#27272a"
+    radius: 8
+    border.color: isActive ? "#3b82f6" : "#3f3f46"
+    border.width: isActive ? 2 : 1
+
+    DropArea {
+        anchors.fill: parent
+        keys: ["commander/files"]
+
+        Rectangle {
+            anchors.fill: parent
+            color: "#3b82f6"
+            opacity: 0.15
+            radius: 8
+            visible: parent.containsDrag
+        }
+
+        onDropped: (drop) => {
+            if (dragProxy.draggedPaths && dragProxy.draggedPaths.length > 0) {
+                fsManager.copyItems(dragProxy.draggedPaths, pane.currentPath);
+                pane.refreshRequested();
+            }
+        }
+    }
+
+    Item {
+        id: dragProxy
+        width: 160
+        height: 30
+        visible: false
+        z: 9999
+        property var draggedPaths: []
+
+        Drag.keys: ["commander/files"]
+        Drag.active: visible
+        Drag.mimeData: { "commander/files": JSON.stringify(draggedPaths) }
+
+        Rectangle {
+            anchors.fill: parent
+            color: "#3b82f6"
+            opacity: 0.85
+            radius: 6
+            border.color: "#ffffff"
+            border.width: 1
+
+            Text {
+                id: dragLabel
+                anchors.centerIn: parent
+                color: "#ffffff"
+                font.bold: true
+                font.pixelSize: 11
+                elide: Text.ElideMiddle
+                width: parent.width - 12
+                horizontalAlignment: Text.AlignHCenter
+            }
+        }
+    }
+
+    function copyPathsToClipboard() {
+        var paths = getSelectedOrCurrentPaths();
+        if (paths.length > 0) fsManager.copyToClipboard(paths);
+    }
+
+    function copyNamesToClipboard() {
+        var names = [];
+        if (!list.model) return;
+        for (var i = 0; i < list.model.length; i++) {
+            if (list.model[i].selected && list.model[i].name !== "..") names.push(list.model[i].name);
+        }
+        if (names.length === 0) {
+            var cur = getCurrentItem();
+            if (cur && cur.name !== "..") names.push(cur.name);
+        }
+        if (names.length > 0) fsManager.copyToClipboard(names);
+    }
+
+    function applyFilter() {
+        if (!rawItems) { list.model = []; return; }
+        if (filterText.trim() === "") {
+            list.model = rawItems;
+        } else {
+            var query = filterText.toLowerCase();
+            var filtered = [];
+            for (var i = 0; i < rawItems.length; i++) {
+                var it = rawItems[i];
+                if (it.name === ".." || it.name.toLowerCase().indexOf(query) !== -1) filtered.push(it);
+            }
+            list.model = filtered;
+        }
+        list.currentIndex = 0;
+    }
+
+    function loadDir(path) {
+        currentPath = path;
+        filterText = "";
+        rawItems = fsManager.readDir(path, sortBy, sortAsc);
+        applyFilter();
+        diskInfo = fsManager.getFreeDiskSpace(path);
+    }
+
+    function toggleSort(col) {
+        if (sortBy === col) sortAsc = !sortAsc;
+        else { sortBy = col; sortAsc = true; }
+        loadDir(currentPath);
+    }
+
+    function goUp() {
+        filterText = "";
+        if (rawItems && rawItems.length > 0 && rawItems[0].name === "..") loadDir(rawItems[0].path);
+    }
+
+    function getCurrentItem() {
+        if (!list.model || list.currentIndex < 0 || list.currentIndex >= list.model.length) return null;
+        return list.model[list.currentIndex];
+    }
+
+    function calculateCurrentDirSize() {
+        var item = getCurrentItem();
+        if (!item || !item.isDir || item.name === "..") return;
+        var curIdx = list.currentIndex;
+        var calcSize = fsManager.calculateDirSize(item.path);
+        var copy = list.model.slice();
+        var updated = Object.assign({}, item);
+        updated.size = calcSize;
+        copy[curIdx] = updated;
+        list.model = copy;
+        list.currentIndex = curIdx;
+    }
+
+    function toggleSelectionAt(idx) {
+        if (!list.model || idx < 0 || idx >= list.model.length) return;
+        var item = list.model[idx];
+        if (item.name === "..") return;
+        var copy = list.model.slice();
+        var updated = Object.assign({}, item);
+        updated.selected = !updated.selected;
+        copy[idx] = updated;
+        list.model = copy;
+    }
+
+    function toggleSelection() {
+        if (!list.model || list.currentIndex < 0) return;
+        var curIdx = list.currentIndex;
+        var nextIdx = (curIdx < list.model.length - 1) ? curIdx + 1 : curIdx;
+        toggleSelectionAt(curIdx);
+        list.currentIndex = nextIdx;
+    }
+
+    function getSelectedOrCurrentPaths() {
+        var res = [];
+        if (!list.model) return res;
+        for (var i = 0; i < list.model.length; i++) {
+            if (list.model[i].selected && list.model[i].name !== "..") res.push(list.model[i].path);
+        }
+        if (res.length === 0) {
+            var cur = getCurrentItem();
+            if (cur && cur.name !== "..") res.push(cur.path);
+        }
+        return res;
+    }
+
+    function getSelectedCount() {
+        var count = 0;
+        if (!list.model) return 0;
+        for (var i = 0; i < list.model.length; i++) {
+            if (list.model[i].selected) count++;
+        }
+        return count;
+    }
+
+    Component.onCompleted: if (currentPath !== "") loadDir(currentPath)
+    onCurrentPathChanged: if (currentPath !== "") loadDir(currentPath)
+
+    ColumnLayout {
+        anchors.fill: parent
+        anchors.margins: 8
+        spacing: 6
+
+        Rectangle {
+            Layout.fillWidth: true
+            height: 30
+            color: "#18181b"
+            radius: 5
+
+            RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: 8
+                anchors.rightMargin: 8
+                spacing: 8
+
+                Text {
+                    text: pane.currentPath
+                    color: "#a1a1aa"
+                    font.family: "monospace"
+                    font.pixelSize: 12
+                    Layout.fillWidth: true
+                    elide: Text.ElideMiddle
+                }
+
+                Rectangle {
+                    visible: pane.filterText.length > 0
+                    height: 22
+                    radius: 4
+                    color: "#3b82f6"
+                    Layout.preferredWidth: filterLabel.implicitWidth + 14
+
+                    RowLayout {
+                        anchors.centerIn: parent
+                        spacing: 4
+                        Text { text: "🔍"; font.pixelSize: 10 }
+                        Text {
+                            id: filterLabel
+                            text: pane.filterText
+                            color: "#ffffff"
+                            font.bold: true
+                            font.family: "monospace"
+                            font.pixelSize: 11
+                        }
+                    }
+                }
+            }
+        }
+
+        RowLayout {
+            Layout.fillWidth: true
+            height: 24
+            spacing: 8
+
+            Item {
+                Layout.fillWidth: true
+                height: parent.height
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "Имя " + (pane.sortBy === "name" ? (pane.sortAsc ? "▲" : "▼") : "")
+                    color: pane.sortBy === "name" ? "#60a5fa" : "#71717a"
+                    font.pixelSize: 11
+                    font.bold: true
+                }
+                MouseArea { 
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: pane.toggleSort("name") 
+                }
+            }
+
+            Item {
+                width: 90
+                height: parent.height
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.right: parent.right
+                    text: "Размер " + (pane.sortBy === "size" ? (pane.sortAsc ? "▲" : "▼") : "")
+                    color: pane.sortBy === "size" ? "#60a5fa" : "#71717a"
+                    font.pixelSize: 11
+                    font.bold: true
+                }
+                MouseArea { 
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: pane.toggleSort("size") 
+                }
+            }
+
+            Item {
+                width: 120
+                height: parent.height
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.right: parent.right
+                    text: "Дата " + (pane.sortBy === "date" ? (pane.sortAsc ? "▲" : "▼") : "")
+                    color: pane.sortBy === "date" ? "#60a5fa" : "#71717a"
+                    font.pixelSize: 11
+                    font.bold: true
+                }
+                MouseArea { 
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: pane.toggleSort("date") 
+                }
+            }
+        }
+
+        ListView {
+            id: listView
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            clip: true
+            highlightFollowsCurrentItem: true
+            focus: pane.isActive
+
+            delegate: Rectangle {
+                width: listView.width
+                height: 26
+                radius: 4
+                color: ListView.isCurrentItem && pane.isActive ? "#3b82f6" : (ListView.isCurrentItem ? "#3f3f46" : "transparent")
+
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: 6
+                    anchors.rightMargin: 6
+                    spacing: 8
+
+                    Text {
+                        text: (modelData.isDir ? "📁 " : (fsManager.isArchiveFile(modelData.name) ? "📦 " : "📄 ")) + modelData.name
+                        color: modelData.selected ? "#fbbf24" : (ListView.isCurrentItem && pane.isActive ? "#ffffff" : "#e4e4e7")
+                        font.pixelSize: 12
+                        font.bold: modelData.selected
+                        Layout.fillWidth: true
+                        elide: Text.ElideRight
+                    }
+
+                    Text {
+                        text: modelData.size
+                        color: modelData.selected ? "#fde68a" : (ListView.isCurrentItem && pane.isActive ? "#dbeafe" : "#71717a")
+                        font.pixelSize: 11
+                        horizontalAlignment: Text.AlignRight
+                        width: 85
+                    }
+
+                    Text {
+                        text: modelData.modified
+                        color: modelData.selected ? "#fde68a" : (ListView.isCurrentItem && pane.isActive ? "#dbeafe" : "#71717a")
+                        font.pixelSize: 11
+                        horizontalAlignment: Text.AlignRight
+                        width: 120
+                    }
+                }
+
+                MouseArea {
+                    anchors.fill: parent
+                    acceptedButtons: Qt.LeftButton | Qt.RightButton
+                    property int pressStartX: 0
+                    property int pressStartY: 0
+                    proimport QtQuick
+import QtQuick.Controls
+import QtQuick.Layouts
+
+Rectangle {
+    id: pane
+    property string currentPath: ""
+    property alias list: listView
+    property bool isActive: false
+    property string sortBy: "name"
+    property bool sortAsc: true
+    property string diskInfo: ""
+    property var rawItems: []
+    property string filterText: ""
+
+    property var fsManager
+    signal activated()
+    signal refreshRequested()
+
+    property bool isRmbDragging: false
+    property var rmbTouchedIndices: ({})
+
+    color: "#27272a"
+    radius: 8
+    border.color: isActive ? "#3b82f6" : "#3f3f46"
+    border.width: isActive ? 2 : 1
+
+    DropArea {
+        anchors.fill: parent
+        keys: ["commander/files"]
+
+        Rectangle {
+            anchors.fill: parent
+            color: "#3b82f6"
+            opacity: 0.15
+            radius: 8
+            visible: parent.containsDrag
+        }
+
+        onDropped: (drop) => {
+            if (dragProxy.draggedPaths && dragProxy.draggedPaths.length > 0) {
+                fsManager.copyItems(dragProxy.draggedPaths, pane.currentPath);
+                pane.refreshRequested();
+            }
+        }
+    }
+
+    Item {
+        id: dragProxy
+        width: 160
+        height: 30
+        visible: false
+        z: 9999
+        property var draggedPaths: []
+
+        Drag.keys: ["commander/files"]
+        Drag.active: visible
+        Drag.mimeData: { "commander/files": JSON.stringify(draggedPaths) }
+
+        Rectangle {
+            anchors.fill: parent
+            color: "#3b82f6"
+            opacity: 0.85
+            radius: 6
+            border.color: "#ffffff"
+            border.width: 1
+
+            Text {
+                id: dragLabel
+                anchors.centerIn: parent
+                color: "#ffffff"
+                font.bold: true
+                font.pixelSize: 11
+                elide: Text.ElideMiddle
+                width: parent.width - 12
+                horizontalAlignment: Text.AlignHCenter
+            }
+        }
+    }
+
+    function copyPathsToClipboard() {
+        var paths = getSelectedOrCurrentPaths();
+        if (paths.length > 0) fsManager.copyToClipboard(paths);
+    }
+
+    function copyNamesToClipboard() {
+        var names = [];
+        if (!list.model) return;
+        for (var i = 0; i < list.model.length; i++) {
+            if (list.model[i].selected && list.model[i].name !== "..") names.push(list.model[i].name);
+        }
+        if (names.length === 0) {
+            var cur = getCurrentItem();
+            if (cur && cur.name !== "..") names.push(cur.name);
+        }
+        if (names.length > 0) fsManager.copyToClipboard(names);
+    }
+
+    function applyFilter() {
+        if (!rawItems) { list.model = []; return; }
+        if (filterText.trim() === "") {
+            list.model = rawItems;
+        } else {
+            var query = filterText.toLowerCase();
+            var filtered = [];
+            for (var i = 0; i < rawItems.length; i++) {
+                var it = rawItems[i];
+                if (it.name === ".." || it.name.toLowerCase().indexOf(query) !== -1) filtered.push(it);
+            }
+            list.model = filtered;
+        }
+        list.currentIndex = 0;
+    }
+
+    function loadDir(path) {
+        currentPath = path;
+        filterText = "";
+        rawItems = fsManager.readDir(path, sortBy, sortAsc);
+        applyFilter();
+        diskInfo = fsManager.getFreeDiskSpace(path);
+    }
+
+    function toggleSort(col) {
+        if (sortBy === col) sortAsc = !sortAsc;
+        else { sortBy = col; sortAsc = true; }
+        loadDir(currentPath);
+    }
+
+    function goUp() {
+        filterText = "";
+        if (rawItems && rawItems.length > 0 && rawItems[0].name === "..") loadDir(rawItems[0].path);
+    }
+
+    function getCurrentItem() {
+        if (!list.model || list.currentIndex < 0 || list.currentIndex >= list.model.length) return null;
+        return list.model[list.currentIndex];
+    }
+
+    function calculateCurrentDirSize() {
+        var item = getCurrentItem();
+        if (!item || !item.isDir || item.name === "..") return;
+        var curIdx = list.currentIndex;
+        var calcSize = fsManager.calculateDirSize(item.path);
+        var copy = list.model.slice();
+        var updated = Object.assign({}, item);
+        updated.size = calcSize;
+        copy[curIdx] = updated;
+        list.model = copy;
+        list.currentIndex = curIdx;
+    }
+
+    function toggleSelectionAt(idx) {
+        if (!list.model || idx < 0 || idx >= list.model.length) return;
+        var item = list.model[idx];
+        if (item.name === "..") return;
+        var copy = list.model.slice();
+        var updated = Object.assign({}, item);
+        updated.selected = !updated.selected;
+        copy[idx] = updated;
+        list.model = copy;
+    }
+
+    function toggleSelection() {
+        if (!list.model || list.currentIndex < 0) return;
+        var curIdx = list.currentIndex;
+        var nextIdx = (curIdx < list.model.length - 1) ? curIdx + 1 : curIdx;
+        toggleSelectionAt(curIdx);
+        list.currentIndex = nextIdx;
+    }
+
+    function getSelectedOrCurrentPaths() {
+        var res = [];
+        if (!list.model) return res;
+        for (var i = 0; i < list.model.length; i++) {
+            if (list.model[i].selected && list.model[i].name !== "..") res.push(list.model[i].path);
+        }
+        if (res.length === 0) {
+            var cur = getCurrentItem();
+            if (cur && cur.name !== "..") res.push(cur.path);
+        }
+        return res;
+    }
+
+    function getSelectedCount() {
+        var count = 0;
+        if (!list.model) return 0;
+        for (var i = 0; i < list.model.length; i++) {
+            if (list.model[i].selected) count++;
+        }
+        return count;
+    }
+
+    Component.onCompleted: if (currentPath !== "") loadDir(currentPath)
+    onCurrentPathChanged: if (currentPath !== "") loadDir(currentPath)
+
+    ColumnLayout {
+        anchors.fill: parent
+        anchors.margins: 8
+        spacing: 6
+
+        Rectangle {
+            Layout.fillWidth: true
+            height: 30
+            color: "#18181b"
+            radius: 5
+
+            RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: 8
+                anchors.rightMargin: 8
+                spacing: 8
+
+                Text {
+                    text: pane.currentPath
+                    color: "#a1a1aa"
+                    font.family: "monospace"
+                    font.pixelSize: 12
+                    Layout.fillWidth: true
+                    elide: Text.ElideMiddle
+                }
+
+                Rectangle {
+                    visible: pane.filterText.length > 0
+                    height: 22
+                    radius: 4
+                    color: "#3b82f6"
+                    Layout.preferredWidth: filterLabel.implicitWidth + 14
+
+                    RowLayout {
+                        anchors.centerIn: parent
+                        spacing: 4
+                        Text { text: "🔍"; font.pixelSize: 10 }
+                        Text {
+                            id: filterLabel
+                            text: pane.filterText
+                            color: "#ffffff"
+                            font.bold: true
+                            font.family: "monospace"
+                            font.pixelSize: 11
+                        }
+                    }
+                }
+            }
+        }
+
+        RowLayout {
+            Layout.fillWidth: true
+            height: 24
+            spacing: 8
+
+            Item {
+                Layout.fillWidth: true
+                height: parent.height
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "Имя " + (pane.sortBy === "name" ? (pane.sortAsc ? "▲" : "▼") : "")
+                    color: pane.sortBy === "name" ? "#60a5fa" : "#71717a"
+                    font.pixelSize: 11
+                    font.bold: true
+                }
+                MouseArea { 
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: pane.toggleSort("name") 
+                }
+            }
+
+            Item {
+                width: 90
+                height: parent.height
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.right: parent.right
+                    text: "Размер " + (pane.sortBy === "size" ? (pane.sortAsc ? "▲" : "▼") : "")
+                    color: pane.sortBy === "size" ? "#60a5fa" : "#71717a"
+                    font.pixelSize: 11
+                    font.bold: true
+                }
+                MouseArea { 
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: pane.toggleSort("size") 
+                }
+            }
+
+            Item {
+                width: 120
+                height: parent.height
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.right: parent.right
+                    text: "Дата " + (pane.sortBy === "date" ? (pane.sortAsc ? "▲" : "▼") : "")
+                    color: pane.sortBy === "date" ? "#60a5fa" : "#71717a"
+                    font.pixelSize: 11
+                    font.bold: true
+                }
+                MouseArea { 
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: pane.toggleSort("date") 
+                }
+            }
+        }
+
+        ListView {
+            id: listView
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            import QtQuick
+import QtQuick.Controls
+import QtQuick.Layouts
+
+Rectangle {
+    id: pane
+    property string currentPath: ""
+    property alias list: listView
+    property bool isActive: false
+    property string sortBy: "name"
+    property bool sortAsc: true
+    property string diskInfo: ""
+    property var rawItems: []
+    property string filterText: ""
+
+    property var fsManager
+    signal activated()
+    signal refreshRequested()
+
+    property bool isRmbDragging: false
+    property var rmbTouchedIndices: ({})
+
+    color: "#27272a"
+    radius: 8
+    border.color: isActive ? "#3b82f6" : "#3f3f46"
+    border.width: isActive ? 2 : 1
+
+    DropArea {
+        anchors.fill: parent
+        keys: ["commander/files"]
+
+        Rectangle {
+            anchors.fill: parent
+            color: "#3b82f6"
+            opacity: 0.15
+            radius: 8
+            visible: parent.containsDrag
+        }
+
+        onDropped: (drop) => {
+            if (dragProxy.draggedPaths && dragProxy.draggedPaths.length > 0) {
+                fsManager.copyItems(dragProxy.draggedPaths, pane.currentPath);
+                pane.refreshRequested();
+            }
+        }
+    }
+
+    Item {
+        id: dragProxy
+        width: 160
+        height: 30
+        visible: false
+        z: 9999
+        property var draggedPaths: []
+
+        Drag.keys: ["commander/files"]
+        Drag.active: visible
+        Drag.mimeData: { "commander/files": JSON.stringify(draggedPaths) }
+
+        Rectangle {
+            anchors.fill: parent
+            color: "#3b82f6"
+            opacity: 0.85
+            radius: 6
+            border.color: "#ffffff"
+            border.width: 1
+
+            Text {
+                id: dragLabel
+                anchors.centerIn: parent
+                color: "#ffffff"
+                font.bold: true
+                font.pixelSize: 11
+                elide: Text.ElideMiddle
+                width: parent.width - 12
+                horizontalAlignment: Text.AlignHCenter
+            }
+        }
+    }
+
+    function copyPathsToClipboard() {
+        var paths = getSelectedOrCurrentPaths();
+        if (paths.length > 0) fsManager.copyToClipboard(paths);
+    }
+
+    function copyNamesToClipboard() {
+        var names = [];
+        if (!list.model) return;
+        for (var i = 0; i < list.model.length; i++) {
+            if (list.model[i].selected && list.model[i].name !== "..") names.push(list.model[i].name);
+        }
+        if (names.length === 0) {
+            var cur = getCurrentItem();
+            if (cur && cur.name !== "..") names.push(cur.name);
+        }
+        if (names.length > 0) fsManager.copyToClipboard(names);
+    }
+
+    function applyFilter() {
+        if (!rawItems) { list.model = []; return; }
+        if (filterText.trim() === "") {
+            list.model = rawItems;
+        } else {
+            var query = filterText.toLowerCase();
+            var filtered = [];
+            for (var i = 0; i < rawItems.length; i++) {
+                var it = rawItems[i];
+                if (it.name === ".." || it.name.toLowerCase().indexOf(query) !== -1) filtered.push(it);
+            }
+            list.model = filtered;
+        }
+        list.currentIndex = 0;
+    }
+
+    function loadDir(path) {
+        currentPath = path;
+        filterText = "";
+        rawItems = fsManager.readDir(path, sortBy, sortAsc);
+        applyFilter();
+        diskInfo = fsManager.getFreeDiskSpace(path);
+    }
+
+    function toggleSort(col) {
+        if (sortBy === col) sortAsc = !sortAsc;
+        else { sortBy = col; sortAsc = true; }
+        loadDir(currentPath);
+    }
+
+    function goUp() {
+        filterText = "";
+        if (rawItems && rawItems.length > 0 && rawItems[0].name === "..") loadDir(rawItems[0].path);
+    }
+
+    function getCurrentItem() {
+        if (!list.model || list.currentIndex < 0 || list.currentIndex >= list.model.length) return null;
+        return list.model[list.currentIndex];
+    }
+
+    function calculateCurrentDirSize() {
+        var item = getCurrentItem();
+        if (!item || !item.isDir || item.name === "..") return;
+        var curIdx = list.currentIndex;
+        var calcSize = fsManager.calculateDirSize(item.path);
+        var copy = list.model.slice();
+        var updated = Object.assign({}, item);
+        updated.size = calcSize;
+        copy[curIdx] = updated;
+        list.model = copy;
+        list.currentIndex = curIdx;
+    }
+
+    function toggleSelectionAt(idx) {
+        if (!list.model || idx < 0 || idx >= list.model.length) return;
+        var item = list.model[idx];
+        if (item.name === "..") return;
+        var copy = list.model.slice();
+        var updated = Object.assign({}, item);
+        updated.selected = !updated.selected;
+        copy[idx] = updated;
+        list.model = copy;
+    }
+
+    function toggleSelection() {
+        if (!list.model || list.currentIndex < 0) return;
+        var curIdx = list.currentIndex;
+        var nextIdx = (curIdx < list.model.length - 1) ? curIdx + 1 : curIdx;
+        toggleSelectionAt(curIdx);
+        list.currentIndex = nextIdx;
+    }
+
+    function getSelectedOrCurrentPaths() {
+        var res = [];
+        if (!list.model) return res;
+        for (var i = 0; i < list.model.length; i++) {
+            if (list.model[i].selected && list.model[i].name !== "..") res.push(list.model[i].path);
+        }
+        if (res.length === 0) {
+            var cur = getCurrentItem();
+            if (cur && cur.name !== "..") res.push(cur.path);
+        }
+        return res;
+    }
+
+    function getSelectedCount() {
+        var count = 0;
+        if (!list.model) return 0;
+        for (var i = 0; i < list.model.length; i++) {
+            if (list.model[i].selected) count++;
+        }
+        return count;
+    }
+
+    Component.onCompleted: if (currentPath !== "") loadDir(currentPath)
+    onCurrentPathChanged: if (currentPath !== "") loadDir(currentPath)
+
+    ColumnLayout {
+        anchors.fill: parent
+        anchors.margins: 8
+        spacing: 6
+
+        Rectangle {
+            Layout.fillWidth: true
+            height: 30
+            color: "#18181b"
+            radius: 5
+
+            RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: 8
+                anchors.rightMargin: 8
+                spacing: 8
+
+                Text {
+                    text: pane.currentPath
+                    color: "#a1a1aa"
+                    font.family: "monospace"
+                    font.pixelSize: 12
+                    Layout.fillWidth: true
+                    elide: Text.ElideMiddle
+                }
+
+                Rectangle {
+                    visible: pane.filterText.length > 0
+                    height: 22
+                    radius: 4
+                    color: "#3b82f6"
+                    Layout.preferredWidth: filterLabel.implicitWidth + 14
+
+                    RowLayout {
+                        anchors.centerIn: parent
+                        spacing: 4
+                        Text { text: "🔍"; font.pixelSize: 10 }
+                        Text {
+                            id: filterLabel
+                            text: pane.filterText
+                            color: "#ffffff"
+                            font.bold: true
+                            font.family: "monospace"
+                            font.pixelSize: 11
+                        }
+                    }
+                }
+            }
+        }
+
+        RowLayout {
+            Layout.fillWidth: true
+            height: 24
+            spacing: 8
+
+            Item {
+                Layout.fillWidth: true
+                height: parent.height
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "Имя " + (pane.sortBy === "name" ? (pane.sortAsc ? "▲" : "▼") : "")
+                    color: pane.sortBy === "name" ? "#60a5fa" : "#71717a"
+                    font.pixelSize: 11
+                    font.bold: true
+                }
+                MouseArea { 
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: pane.toggleSort("name") 
+                }
+            }
+
+            Item {
+                width: 90
+                height: parent.height
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.right: parent.right
+                    text: "Размер " + (pane.sortBy === "size" ? (pane.sortAsc ? "▲" : "▼") : "")
+                    color: pane.sortBy === "size" ? "#60a5fa" : "#71717a"
+                    font.pixelSize: 11
+                    font.bold: true
+                }
+                MouseArea { 
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: pane.toggleSort("size") 
+                }
+            }
+
+            Item {
+                width: 120
+                height: parent.height
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.right: parent.right
+                    text: "Дата " + (pane.sortBy === "date" ? (pane.sortAsc ? "▲" : "▼") : "")
+                    color: pane.sortBy === "date" ? "#60a5fa" : "#71717a"
+                    font.pixelSize: 11
+                    font.bold: true
+                }
+                MouseArea { 
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: pane.toggleSort("date") 
+                }
+            }
+        }
+
+        ListView {
+            id: listView
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            import QtQuick
+import QtQuick.Controls
+import QtQuick.Layouts
+
+Rectangle {
+    id: pane
+    property string currentPath: ""
+    property alias list: listView
+    property bool isActive: false
+    property string sortBy: "name"
+    property bool sortAsc: true
+    property string diskInfo: ""
+    property var rawItems: []
+    property string filterText: ""
+
+    property var fsManager
+    signal activated()
+    signal refreshRequested()
+
+    property bool isRmbDragging: false
+    property var rmbTouchedIndices: ({})
+
+    color: "#27272a"
+    radius: 8
+    border.color: isActive ? "#3b82f6" : "#3f3f46"
+    border.width: isActive ? 2 : 1
+
+    DropArea {
+        anchors.fill: parent
+        keys: ["commander/files"]
+
+        Rectangle {
+            anchors.fill: parent
+            color: "#3b82f6"
+            opacity: 0.15
+            radius: 8
+            visible: parent.containsDrag
+        }
+
+        onDropped: (drop) => {
+            if (dragProxy.draggedPaths && dragProxy.draggedPaths.length > 0) {
+                fsManager.copyItems(dragProxy.draggedPaths, pane.currentPath);
+                pane.refreshRequested();
+            }
+        }
+    }
+
+    Item {
+        id: dragProxy
+        width: 160
+        height: 30
+        visible: false
+        z: 9999
+        property var draggedPaths: []
+
+        Drag.keys: ["commander/files"]
+        Drag.active: visible
+        Drag.mimeData: { "commander/files": JSON.stringify(draggedPaths) }
+
+        Rectangle {
+            anchors.fill: parent
+            color: "#3b82f6"
+            opacity: 0.85
+            radius: 6
+            border.color: "#ffffff"
+            border.width: 1
+
+            Text {
+                id: dragLabel
+                anchors.centerIn: parent
+                color: "#ffffff"
+                font.bold: true
+                font.pixelSize: 11
+                elide: Text.ElideMiddle
+                width: parent.width - 12
+                horizontalAlignment: Text.AlignHCenter
+            }
+        }
+    }
+
+    function copyPathsToClipboard() {
+        var paths = getSelectedOrCurrentPaths();
+        if (paths.length > 0) fsManager.copyToClipboard(paths);
+    }
+
+    function copyNamesToClipboard() {
+        var names = [];
+        if (!list.model) return;
+        for (var i = 0; i < list.model.length; i++) {
+            if (list.model[i].selected && list.model[i].name !== "..") names.push(list.model[i].name);
+        }
+        if (names.length === 0) {
+            var cur = getCurrentItem();
+            if (cur && cur.name !== "..") names.push(cur.name);
+        }
+        if (names.length > 0) fsManager.copyToClipboard(names);
+    }
+
+    function applyFilter() {
+        if (!rawItems) { list.model = []; return; }
+        if (filterText.trim() === "") {
+            list.model = rawItems;
+        } else {
+            var query = filterText.toLowerCase();
+            var filtered = [];
+            for (var i = 0; i < rawItems.length; i++) {
+                var it = rawItems[i];
+                if (it.name === ".." || it.name.toLowerCase().indexOf(query) !== -1) filtered.push(it);
+            }
+            list.model = filtered;
+        }
+        list.currentIndex = 0;
+    }
+
+    function loadDir(path) {
+        currentPath = path;
+        filterText = "";
+        rawItems = fsManager.readDir(path, sortBy, sortAsc);
+        applyFilter();
+        diskInfo = fsManager.getFreeDiskSpace(path);
+    }
+
+    function toggleSort(col) {
+        if (sortBy === col) sortAsc = !sortAsc;
+        else { sortBy = col; sortAsc = true; }
+        loadDir(currentPath);
+    }
+
+    function goUp() {
+        filterText = "";
+        if (rawItems && rawItems.length > 0 && rawItems[0].name === "..") loadDir(rawItems[0].path);
+    }
+
+    function getCurrentItem() {
+        if (!list.model || list.currentIndex < 0 || list.currentIndex >= list.model.length) return null;
+        return list.model[list.currentIndex];
+    }
+
+    function calculateCurrentDirSize() {
+        var item = getCurrentItem();
+        if (!item || !item.isDir || item.name === "..") return;
+        var curIdx = list.currentIndex;
+        var calcSize = fsManager.calculateDirSize(item.path);
+        var copy = list.model.slice();
+        var updated = Object.assign({}, item);
+        updated.size = calcSize;
+        copy[curIdx] = updated;
+        list.model = copy;
+        list.currentIndex = curIdx;
+    }
+
+    function toggleSelectionAt(idx) {
+        if (!list.model || idx < 0 || idx >= list.model.length) return;
+        var item = list.model[idx];
+        if (item.name === "..") return;
+        var copy = list.model.slice();
+        var updated = Object.assign({}, item);
+        updated.selected = !updated.selected;
+        copy[idx] = updated;
+        list.model = copy;
+    }
+
+    function toggleSelection() {
+        if (!list.model || list.currentIndex < 0) return;
+        var curIdx = list.currentIndex;
+        var nextIdx = (curIdx < list.model.length - 1) ? curIdx + 1 : curIdx;
+        toggleSelectionAt(curIdx);
+        list.currentIndex = nextIdx;
+    }
+
+    function getSelectedOrCurrentPaths() {
+        var res = [];
+        if (!list.model) return res;
+        for (var i = 0; i < list.model.length; i++) {
+            if (list.model[i].selected && list.model[i].name !== "..") res.push(list.model[i].path);
+        }
+        if (res.length === 0) {
+            var cur = getCurrentItem();
+            if (cur && cur.name !== "..") res.push(cur.path);
+        }
+        return res;
+    }
+
+    function getSelectedCount() {
+        var count = 0;
+        if (!list.model) return 0;
+        for (var i = 0; i < list.model.length; i++) {
+            if (list.model[i].selected) count++;
+        }
+        return count;
+    }
+
+    Component.onCompleted: if (currentPath !== "") loadDir(currentPath)
+    onCurrentPathChanged: if (currentPath !== "") loadDir(currentPath)
+
+    ColumnLayout {
+        anchors.fill: parent
+        anchors.margins: 8
+        spacing: 6
+
+        Rectangle {
+            Layout.fillWidth: true
+            height: 30
+            color: "#18181b"
+            radius: 5
+
+            RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: 8
+                anchors.rightMargin: 8
+                spacing: 8
+
+                Text {
+                    text: pane.currentPath
+                    color: "#a1a1aa"
+                    font.family: "monospace"
+                    font.pixelSize: 12
+                    Layout.fillWidth: true
+                    elide: Text.ElideMiddle
+                }
+
+                Rectangle {
+                    visible: pane.filterText.length > 0
+                    height: 22
+                    radius: 4
+                    color: "#3b82f6"
+                    Layout.preferredWidth: filterLabel.implicitWidth + 14
+
+                    RowLayout {
+                        anchors.centerIn: parent
+                        spacing: 4
+                        Text { text: "🔍"; font.pixelSize: 10 }
+                        Text {
+                            id: filterLabel
+                            text: pane.filterText
+                            color: "#ffffff"
+                            font.bold: true
+                            font.family: "monospace"
+                            font.pixelSize: 11
+                        }
+                    }
+                }
+            }
+        }
+
+        RowLayout {
+            Layout.fillWidth: true
+            height: 24
+            spacing: 8
+
+            Item {
+                Layout.fillWidth: true
+                height: parent.height
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "Имя " + (pane.sortBy === "name" ? (pane.sortAsc ? "▲" : "▼") : "")
+                    color: pane.sortBy === "name" ? "#60a5fa" : "#71717a"
+                    font.pixelSize: 11
+                    font.bold: true
+                }
+                MouseArea { 
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: pane.toggleSort("name") 
+                }
+            }
+
+            Item {
+                width: 90
+                height: parent.height
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.right: parent.right
+                    text: "Размер " + (pane.sortBy === "size" ? (pane.sortAsc ? "▲" : "▼") : "")
+                    color: pane.sortBy === "size" ? "#60a5fa" : "#71717a"
+                    font.pixelSize: 11
+                    font.bold: true
+                }
+                MouseArea { 
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: pane.toggleSort("size") 
+                }
+            }
+
+            Item {
+                width: 120
+                height: parent.height
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.right: parent.right
+                    text: "Дата " + (pane.sortBy === "date" ? (pane.sortAsc ? "▲" : "▼") : "")
+                    color: pane.sortBy === "date" ? "#60a5fa" : "#71717a"
+                    font.pixelSize: 11
+                    font.bold: true
+                }
+                MouseArea { 
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: pane.toggleSort("date") 
+                }
+            }
+        }
+
+        ListView {
+            id: listView
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            
