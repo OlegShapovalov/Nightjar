@@ -20,6 +20,20 @@ ApplicationWindow {
         id: fsManager
         onCommandFinished: root.refreshBoth()
         onArchiveOperationFinished: root.refreshBoth()
+
+        onCopyProgress: (progress, currentFileName, copiedSizeStr, totalSizeStr, speedStr, etaStr) => {
+            copyProgressBar.value = progress;
+            copyStatusFile.text = currentFileName;
+            copyStatusDetails.text = copiedSizeStr + " / " + totalSizeStr + "  (" + speedStr + ")";
+            copyStatusEta.text = "Осталось: " + etaStr;
+            if (!copyProgressDialog.opened) copyProgressDialog.open();
+        }
+
+        onCopyFinished: (success, wasCancelled) => {
+            copyProgressDialog.close();
+            root.refreshBoth();
+            activePane.list.forceActiveFocus();
+        }
     }
 
     property var activePane: leftPane
@@ -29,6 +43,10 @@ ApplicationWindow {
     property bool confirmDeletion: true
     property int listFontSize: 12
     property string customEditorCmd: ""
+
+    // Буфер операции копирования
+    property var pendingCopyPaths: []
+    property string pendingCopyDest: ""
 
     function applySettings() {
         showHiddenFiles = Boolean(fsManager.getSetting("showHidden", false));
@@ -136,6 +154,76 @@ ApplicationWindow {
     function refreshBoth() {
         leftPane.loadDir(leftPane.currentPath);
         rightPane.loadDir(rightPane.currentPath);
+    }
+
+    // 1. Показываем диалог подтверждения целевого пути
+    function requestCopyConfirmation(paths, destDir) {
+        if (!paths || paths.length === 0 || !destDir) return;
+        pendingCopyPaths = paths;
+        pendingCopyDest = destDir;
+        destinationConfirmText.text = "Скопировать объектов: " + paths.length + "\n\nВ каталог назначения:\n" + destDir + "\n\nПуть указан верно?";
+        copyConfirmDestinationDialog.open();
+    }
+
+    // 2. Проверяем конфликты имён перед реальным запуском копирования
+    function executeCopyOperation(paths, destDir) {
+        var conflicts = fsManager.getConflictingFiles(paths, destDir);
+        if (conflicts && conflicts.length > 0) {
+            pendingCopyPaths = paths;
+            pendingCopyDest = destDir;
+            conflictText.text = "В каталоге назначения уже существуют файлы (" + conflicts.length + " шт.):\n" + conflicts.slice(0, 3).join(", ") + (conflicts.length > 3 ? "..." : "") + "\n\nПерезаписать существующие объекты?";
+            overwriteConfirmDialog.open();
+        } else {
+            fsManager.copyItems(paths, destDir, true);
+        }
+    }
+
+    // Отслеживание курсора при Drag-and-Drop и подсветка строк-папок
+    function checkHoverOverPanes(wx, wy) {
+        var leftPt = root.contentItem.mapToItem(leftPane, wx, wy);
+        var inLeft = (leftPt.x >= 0 && leftPt.x <= leftPane.width && leftPt.y >= 0 && leftPt.y <= leftPane.height);
+
+        var rightPt = root.contentItem.mapToItem(rightPane, wx, wy);
+        var inRight = (rightPt.x >= 0 && rightPt.x <= rightPane.width && rightPt.y >= 0 && rightPt.y <= rightPane.height);
+
+        leftPane.isDropTarget = inLeft && (activePane !== leftPane);
+        rightPane.isDropTarget = inRight && (activePane !== rightPane);
+
+        if (leftPane.isDropTarget) {
+            leftPane.updateHoverIndex(wx, wy);
+        } else {
+            leftPane.hoveredDropIndex = -1;
+        }
+
+        if (rightPane.isDropTarget) {
+            rightPane.updateHoverIndex(wx, wy);
+        } else {
+            rightPane.hoveredDropIndex = -1;
+        }
+    }
+
+    // Бросок мыши: вычисляем точную целевую папку и запрашиваем подтверждение пути
+    function handleDrop(wx, wy, paths) {
+        leftPane.isDropTarget = false;
+        leftPane.hoveredDropIndex = -1;
+        rightPane.isDropTarget = false;
+        rightPane.hoveredDropIndex = -1;
+
+        if (!paths || paths.length === 0) return;
+
+        var leftPt = root.contentItem.mapToItem(leftPane, wx, wy);
+        var inLeft = (leftPt.x >= 0 && leftPt.x <= leftPane.width && leftPt.y >= 0 && leftPt.y <= leftPane.height);
+
+        var rightPt = root.contentItem.mapToItem(rightPane, wx, wy);
+        var inRight = (rightPt.x >= 0 && rightPt.x <= rightPane.width && rightPt.y >= 0 && rightPt.y <= rightPane.height);
+
+        if (inLeft && activePane !== leftPane) {
+            var targetFolder = leftPane.getTargetFolderAt(wx, wy);
+            requestCopyConfirmation(paths, targetFolder);
+        } else if (inRight && activePane !== rightPane) {
+            var targetFolder2 = rightPane.getTargetFolderAt(wx, wy);
+            requestCopyConfirmation(paths, targetFolder2);
+        }
     }
 
     function triggerPack() {
@@ -252,10 +340,26 @@ ApplicationWindow {
             if (item && !item.isDir) fsManager.editFile(item.path, customEditorCmd);
         }
     }
-    Shortcut { sequence: "F5"; onActivated: if (activePane.getSelectedOrCurrentPaths().length > 0) copyDialog.open() }
+    Shortcut { 
+        sequence: "F5"
+        onActivated: {
+            var paths = activePane.getSelectedOrCurrentPaths();
+            if (paths.length > 0) root.requestCopyConfirmation(paths, targetPane.currentPath);
+        }
+    }
     Shortcut { sequence: "F6"; onActivated: if (activePane.getSelectedOrCurrentPaths().length > 0) moveDialog.open() }
     Shortcut { sequence: "F7"; onActivated: { folderNameInput.text = ""; mkdirDialog.open(); } }
-    Shortcut { sequence: "F8"; onActivated: root.triggerDelete() }
+    Shortcut { sequences: ["F8", "Delete"]; onActivated: root.triggerDelete() }
+    Shortcut {
+        sequence: "Shift+Delete"
+        onActivated: {
+            var paths = root.activePane.getSelectedOrCurrentPaths();
+            if (paths.length > 0) {
+                fsManager.deleteItems(paths);
+                root.activePane.loadDir(root.activePane.currentPath);
+            }
+        }
+    }
     Shortcut { sequence: "Alt+F5"; onActivated: root.triggerPack() }
     Shortcut { sequence: "Alt+F9"; onActivated: root.triggerUnpack() }
 
@@ -275,7 +379,10 @@ ApplicationWindow {
             onRenameClicked: root.openRenameDialog()
             onPackClicked: root.triggerPack()
             onUnpackClicked: root.triggerUnpack()
-            onCopyClicked: if (activePane.getSelectedOrCurrentPaths().length > 0) copyDialog.open()
+            onCopyClicked: {
+                var paths = activePane.getSelectedOrCurrentPaths();
+                if (paths.length > 0) root.requestCopyConfirmation(paths, targetPane.currentPath);
+            }
             onMoveClicked: if (activePane.getSelectedOrCurrentPaths().length > 0) moveDialog.open()
             onDeleteClicked: root.triggerDelete()
             onSettingsClicked: root.openSettingsDialog()
@@ -336,9 +443,7 @@ ApplicationWindow {
         id: connectDialog
         theme: appTheme
         fsManager: fsManager
-        onConnected: (targetPath) => {
-            root.activePane.addNewTab(targetPath);
-        }
+        onConnected: (targetPath) => { root.activePane.addNewTab(targetPath); }
         onClosed: activePane.list.forceActiveFocus()
     }
 
@@ -374,23 +479,113 @@ ApplicationWindow {
         onClosed: activePane.list.forceActiveFocus()
     }
 
+    // 1. Диалог подтверждения пути назначения
     Dialog {
-        id: copyDialog
+        id: copyConfirmDestinationDialog
         anchors.centerIn: parent
-        width: 380
-        title: "Копирование"
+        width: 440
+        title: "Подтверждение копирования"
         modal: true
         standardButtons: Dialog.Ok | Dialog.Cancel
         Text {
-            text: "Скопировать объектов: " + activePane.getSelectedOrCurrentPaths().length + "\nВ: " + targetPane.currentPath
+            id: destinationConfirmText
+            text: ""
             color: appTheme.textPrimary
+            wrapMode: Text.Wrap
+            width: parent.width - 24
         }
         onAccepted: {
-            fsManager.copyItems(activePane.getSelectedOrCurrentPaths(), targetPane.currentPath);
-            root.refreshBoth();
+            root.executeCopyOperation(pendingCopyPaths, pendingCopyDest);
             activePane.list.forceActiveFocus();
         }
-        onRejected: activePane.list.forceActiveFocus()
+        onRejected: {
+            pendingCopyPaths = [];
+            pendingCopyDest = "";
+            activePane.list.forceActiveFocus();
+        }
+    }
+
+    // 2. Диалог перезаписи существующих файлов (при конфликте)
+    Dialog {
+        id: overwriteConfirmDialog
+        anchors.centerIn: parent
+        width: 420
+        title: "Конфликт имён"
+        modal: true
+        standardButtons: Dialog.Yes | Dialog.No
+        Text {
+            id: conflictText
+            text: ""
+            color: appTheme.textPrimary
+            wrapMode: Text.Wrap
+            width: parent.width - 24
+        }
+        onAccepted: {
+            fsManager.copyItems(pendingCopyPaths, pendingCopyDest, true);
+            pendingCopyPaths = [];
+            pendingCopyDest = "";
+            activePane.list.forceActiveFocus();
+        }
+        onRejected: {
+            pendingCopyPaths = [];
+            pendingCopyDest = "";
+            activePane.list.forceActiveFocus();
+        }
+    }
+
+    // 3. Диалог прогресса копирования в стиле Total Commander
+    Dialog {
+        id: copyProgressDialog
+        anchors.centerIn: parent
+        width: 440
+        title: "Копирование файлов..."
+        modal: true
+        closePolicy: Popup.NoAutoClose
+
+        ColumnLayout {
+            spacing: 8
+            width: parent.width
+
+            Text {
+                id: copyStatusFile
+                text: "Подготовка..."
+                color: appTheme.textPrimary
+                font.bold: true
+                elide: Text.ElideMiddle
+                Layout.fillWidth: true
+            }
+
+            ProgressBar {
+                id: copyProgressBar
+                Layout.fillWidth: true
+                from: 0.0
+                to: 1.0
+                value: 0.0
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Text {
+                    id: copyStatusDetails
+                    text: "0 B / 0 B (0 B/s)"
+                    color: appTheme.textSecondary
+                    font.pixelSize: 11
+                    Layout.fillWidth: true
+                }
+                Text {
+                    id: copyStatusEta
+                    text: "Осталось: --"
+                    color: appTheme.textSecondary
+                    font.pixelSize: 11
+                }
+            }
+
+            Button {
+                text: "Отмена"
+                Layout.alignment: Qt.AlignRight
+                onClicked: fsManager.cancelCopy()
+            }
+        }
     }
 
     Dialog {

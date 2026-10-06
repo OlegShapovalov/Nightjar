@@ -5,6 +5,7 @@
 #include <QStringList>
 #include <QVariantList>
 #include <QVariant>
+#include <atomic>
 
 class FileManager : public QObject {
     Q_OBJECT
@@ -22,7 +23,14 @@ public:
     Q_INVOKABLE void runCommand(const QString& workingDir, const QString& command);
     Q_INVOKABLE bool createDirectory(const QString& basePath, const QString& dirName);
     Q_INVOKABLE bool deleteItems(const QStringList& paths);
-    Q_INVOKABLE bool copyItems(const QStringList& paths, const QString& destDir);
+    
+    // Проверка наличия конфликтов перед копированием
+    Q_INVOKABLE QStringList getConflictingFiles(const QStringList& paths, const QString& destDir);
+
+    // Асинхронное копирование с прогрессом
+    Q_INVOKABLE void copyItems(const QStringList& paths, const QString& destDir, bool overwrite = true);
+    Q_INVOKABLE void cancelCopy();
+
     Q_INVOKABLE bool moveItems(const QStringList& paths, const QString& destDir);
     Q_INVOKABLE bool renameItems(const QVariantList& renamePairs);
     Q_INVOKABLE QVariantList searchFiles(const QString& startPath, const QString& nameQuery, const QString& textQuery);
@@ -48,4 +56,11 @@ signals:
     void commandFinished();
     void archiveOperationFinished();
     void sshMountFinished(bool success, const QString& mountPath, const QString& errorMessage);
+
+    // Сигналы прогресса в стиле Total Commander
+    void copyProgress(qreal progress, QString currentFileName, QString copiedSizeStr, QString totalSizeStr, QString speedStr, QString etaStr);
+    void copyFinished(bool success, bool wasCancelled);
+
+private:
+    std::atomic<bool> m_cancelRequested{false};
 };

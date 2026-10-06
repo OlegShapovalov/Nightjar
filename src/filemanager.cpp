@@ -12,6 +12,8 @@
 #include <QJSValue>
 #include <QFontDatabase>
 #include <QStandardPaths>
+#include <QThread>
+#include <QElapsedTimer>
 #include <cstdlib>
 #include <filesystem>
 #include <algorithm>
@@ -259,16 +261,141 @@ bool FileManager::deleteItems(const QStringList& paths) {
     return ok;
 }
 
-bool FileManager::copyItems(const QStringList& paths, const QString& destDir) {
-    bool ok = true;
-    const auto copyOptions = fs::copy_options::recursive | fs::copy_options::overwrite_existing;
-    for (const auto& path : paths) {
-        try {
-            fs::path srcPath(path.toStdString());
-            fs::copy(srcPath, fs::path(destDir.toStdString()) / srcPath.filename(), copyOptions);
-        } catch (...) { ok = false; }
+static QString formatSize(uintmax_t bytes) {
+    if (bytes < 1024) return QString::number(bytes) + " B";
+    if (bytes < 1024 * 1024) return QString::number(bytes / 1024.0, 'f', 1) + " KB";
+    if (bytes < 1024 * 1024 * 1024) return QString::number(bytes / (1024.0 * 1024.0), 'f', 1) + " MB";
+    return QString::number(bytes / (1024.0 * 1024.0 * 1024.0), 'f', 2) + " GB";
+}
+
+QStringList FileManager::getConflictingFiles(const QStringList& paths, const QString& destDir) {
+    QStringList conflicts;
+    fs::path dest(destDir.toStdString());
+    for (const auto& pStr : paths) {
+        fs::path p(pStr.toStdString());
+        fs::path target = dest / p.filename();
+        std::error_code ec;
+        if (fs::exists(target, ec)) {
+            conflicts.append(QString::fromStdString(p.filename().string()));
+        }
     }
-    return ok;
+    return conflicts;
+}
+
+void FileManager::cancelCopy() {
+    m_cancelRequested = true;
+}
+
+void FileManager::copyItems(const QStringList& paths, const QString& destDir, bool overwrite) {
+    m_cancelRequested = false;
+
+    // Запускаем процесс в фоновом потоке, не подвешивая UI
+    QThread* workerThread = QThread::create([this, paths, destDir, overwrite]() {
+        uintmax_t totalBytes = 0;
+        std::vector<std::pair<fs::path, fs::path>> filePairs;
+        fs::path targetBasePath(destDir.toStdString());
+
+        // 1. Предварительный расчет общего веса для прогресс-бара
+        for (const auto& pStr : paths) {
+            if (m_cancelRequested) break;
+            fs::path src(pStr.toStdString());
+            std::error_code ec;
+            if (!fs::exists(src, ec)) continue;
+
+            if (fs::is_directory(src, ec)) {
+                fs::path destFolder = targetBasePath / src.filename();
+                fs::create_directories(destFolder, ec);
+                for (const auto& entry : fs::recursive_directory_iterator(src, fs::directory_options::skip_permission_denied, ec)) {
+                    if (m_cancelRequested) break;
+                    auto rel = fs::relative(entry.path(), src, ec);
+                    fs::path curDest = destFolder / rel;
+                    if (entry.is_directory(ec)) {
+                        fs::create_directories(curDest, ec);
+                    } else if (entry.is_regular_file(ec)) {
+                        uintmax_t sz = entry.file_size(ec);
+                        totalBytes += sz;
+                        filePairs.push_back({entry.path(), curDest});
+                    }
+                }
+            } else {
+                uintmax_t sz = fs::file_size(src, ec);
+                totalBytes += sz;
+                filePairs.push_back({src, targetBasePath / src.filename()});
+            }
+        }
+
+        if (m_cancelRequested) {
+            emit copyFinished(false, true);
+            return;
+        }
+
+        // 2. Потоковое копирование кусками по 256 KB с замером времени и скорости
+        uintmax_t copiedBytes = 0;
+        QElapsedTimer timer;
+        timer.start();
+        qint64 lastUpdate = 0;
+
+        bool allSuccess = true;
+        char buffer[256 * 1024];
+
+        for (const auto& pair : filePairs) {
+            if (m_cancelRequested) {
+                allSuccess = false;
+                break;
+            }
+
+            fs::path src = pair.first;
+            fs::path dst = pair.second;
+            std::error_code ec;
+
+            if (!overwrite && fs::exists(dst, ec)) {
+                continue;
+            }
+
+            FILE* in = fopen(src.string().c_str(), "rb");
+            if (!in) { allSuccess = false; continue; }
+
+            FILE* out = fopen(dst.string().c_str(), "wb");
+            if (!out) { fclose(in); allSuccess = false; continue; }
+
+            QString currentFileName = QString::fromStdString(src.filename().string());
+
+            while (!feof(in) && !m_cancelRequested) {
+                size_t r = fread(buffer, 1, sizeof(buffer), in);
+                if (r > 0) {
+                    fwrite(buffer, 1, r, out);
+                    copiedBytes += r;
+                }
+
+                qint64 elapsed = timer.elapsed();
+                if (elapsed - lastUpdate > 80 || copiedBytes == totalBytes) { // Обновление каждые 80мс
+                    lastUpdate = elapsed;
+                    qreal progress = totalBytes > 0 ? (qreal)copiedBytes / totalBytes : 1.0;
+                    
+                    double speedBytesPerSec = elapsed > 0 ? (double)copiedBytes / (elapsed / 1000.0) : 0;
+                    QString speedStr = formatSize((uintmax_t)speedBytesPerSec) + "/s";
+
+                    QString etaStr = "Подсчет...";
+                    if (speedBytesPerSec > 1024) {
+                        uintmax_t remainingBytes = totalBytes > copiedBytes ? (totalBytes - copiedBytes) : 0;
+                        int remSec = (int)(remainingBytes / speedBytesPerSec);
+                        if (remSec < 60) etaStr = QString("%1 сек.").arg(remSec);
+                        else etaStr = QString("%1 мин. %2 сек.").arg(remSec / 60).arg(remSec % 60);
+                    }
+
+                    emit copyProgress(progress, currentFileName, formatSize(copiedBytes), formatSize(totalBytes), speedStr, etaStr);
+                }
+            }
+
+            fclose(in);
+            fclose(out);
+        }
+
+        emit copyFinished(allSuccess && !m_cancelRequested, m_cancelRequested.load());
+    });
+
+    connect(workerThread, &QThread::finished, workerThread, &QObject::deleteLater);
+    workerThread->start();
 }
 
 bool FileManager::moveItems(const QStringList& paths, const QString& destDir) {
@@ -477,7 +604,6 @@ void FileManager::mountSsh(const QString& host, int port, const QString& user, c
 
     QDir().mkpath(baseMountPath);
 
-    // Гарантируем чистые пробелы между ключами, портом и путями
     QString cmd;
     if (password.trimmed().isEmpty()) {
         cmd = QString("sshfs -p %1 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null %2@%3:%4 \"%5\"")

@@ -4,13 +4,15 @@ import QtQuick.Layouts
 
 Rectangle {
     id: pane
-    color: theme ? theme.bgApp : "#18181b"
-    border.color: isActive ? (theme ? theme.accent : "#3b82f6") : (theme ? theme.border : "#27272a")
-    border.width: 1
+    color: theme ? theme.bgApp : (palette.window ? palette.window : "#18181b")
+    border.color: isDropTarget ? (theme ? theme.accent : "#3b82f6") : (isActive ? (theme ? theme.accent : "#3b82f6") : (theme ? theme.border : "#27272a"))
+    border.width: isDropTarget ? 2 : 1
     radius: 6
 
     property var theme
     property bool isActive: false
+    property bool isDropTarget: false
+    property int hoveredDropIndex: -1
     property string currentPath: ""
     property var fsManager
     property string sortBy: "name"
@@ -159,6 +161,30 @@ Rectangle {
         if (names.length > 0) fsManager.copyToClipboard(names);
     }
 
+    // Определяет целевую папку под экранными координатами курсора
+    function getTargetFolderAt(wx, wy) {
+        var listPt = root.contentItem.mapToItem(fileList, wx, wy);
+        var idx = fileList.indexAt(listPt.x, listPt.y);
+        if (idx >= 0 && idx < fileList.model.length) {
+            var targetItem = fileList.model[idx];
+            if (targetItem.isDir) {
+                return targetItem.path;
+            }
+        }
+        return currentPath;
+    }
+
+    // Обновляет подсветку папки-приемника под курсором
+    function updateHoverIndex(wx, wy) {
+        var listPt = root.contentItem.mapToItem(fileList, wx, wy);
+        var idx = fileList.indexAt(listPt.x, listPt.y);
+        if (idx >= 0 && idx < fileList.model.length && fileList.model[idx].isDir) {
+            hoveredDropIndex = idx;
+        } else {
+            hoveredDropIndex = -1;
+        }
+    }
+
     MouseArea {
         anchors.fill: parent
         onPressed: pane.activated()
@@ -173,7 +199,7 @@ Rectangle {
         Rectangle {
             Layout.fillWidth: true
             height: 28
-            color: pane.theme ? pane.theme.bgApp : "#18181b"
+            color: pane.theme ? pane.theme.bgApp : (palette.window ? palette.window : "#18181b")
 
             RowLayout {
                 anchors.fill: parent
@@ -275,11 +301,11 @@ Rectangle {
             }
         }
 
-        // Адресная строка + кнопка Unmount для SSH
+        // Адресная строка
         Rectangle {
             Layout.fillWidth: true
             height: 24
-            color: pane.theme ? pane.theme.bgInput : "#27272a"
+            color: pane.theme ? pane.theme.bgInput : (palette.base ? palette.base : "#27272a")
             radius: 4
 
             RowLayout {
@@ -290,7 +316,7 @@ Rectangle {
 
                 Text {
                     text: pane.currentPath
-                    color: pane.theme ? pane.theme.textPrimary : "#e4e4e7"
+                    color: pane.theme ? pane.theme.textPrimary : (palette.text ? palette.text : "#e4e4e7")
                     font.family: pane.paneFontFamily
                     font.bold: true
                     font.pixelSize: 11
@@ -333,7 +359,7 @@ Rectangle {
         Rectangle {
             Layout.fillWidth: true
             height: 22
-            color: pane.theme ? pane.theme.bgSurface : "#1f1f23"
+            color: pane.theme ? pane.theme.bgSurface : (palette.window ? palette.window : "#1f1f23")
 
             RowLayout {
                 anchors.fill: parent
@@ -347,7 +373,8 @@ Rectangle {
                     color: "transparent"
                     Text {
                         text: "Имя " + (pane.sortBy === "name" ? (pane.sortAsc ? "▲" : "▼") : "")
-                        color: pane.theme ? pane.theme.textSecondary : "#a1a1aa"; font.bold: true; font.pixelSize: 11
+                        color: pane.theme ? pane.theme.textSecondary : (palette.placeholderText ? palette.placeholderText : "#a1a1aa"); 
+                        font.bold: true; font.pixelSize: 11
                         anchors.verticalCenter: parent.verticalCenter
                     }
                     MouseArea { anchors.fill: parent; onClicked: pane.toggleSort("name") }
@@ -359,7 +386,8 @@ Rectangle {
                     color: "transparent"
                     Text {
                         text: "Размер " + (pane.sortBy === "size" ? (pane.sortAsc ? "▲" : "▼") : "")
-                        color: pane.theme ? pane.theme.textSecondary : "#a1a1aa"; font.bold: true; font.pixelSize: 11
+                        color: pane.theme ? pane.theme.textSecondary : (palette.placeholderText ? palette.placeholderText : "#a1a1aa"); 
+                        font.bold: true; font.pixelSize: 11
                         anchors.right: parent.right
                         anchors.verticalCenter: parent.verticalCenter
                     }
@@ -372,7 +400,8 @@ Rectangle {
                     color: "transparent"
                     Text {
                         text: "Дата " + (pane.sortBy === "date" ? (pane.sortAsc ? "▲" : "▼") : "")
-                        color: pane.theme ? pane.theme.textSecondary : "#a1a1aa"; font.bold: true; font.pixelSize: 11
+                        color: pane.theme ? pane.theme.textSecondary : (palette.placeholderText ? palette.placeholderText : "#a1a1aa"); 
+                        font.bold: true; font.pixelSize: 11
                         anchors.right: parent.right
                         anchors.verticalCenter: parent.verticalCenter
                     }
@@ -381,125 +410,205 @@ Rectangle {
             }
         }
 
-        // Список файлов
-        ListView {
-            id: fileList
+        // Контейнер списка файлов
+        Rectangle {
             Layout.fillWidth: true
             Layout.fillHeight: true
+            color: pane.theme ? pane.theme.bgSurface : (palette.base ? palette.base : "#18181b")
+            radius: 4
             clip: true
-            focus: true
 
-            delegate: Rectangle {
-                width: fileList.width
-                height: pane.itemFontSize + 12
-                radius: 3
-                color: {
-                    if (modelData.selected) return "#831843";
-                    if (ListView.isCurrentItem && pane.isActive) return pane.theme ? pane.theme.accentActive : "#2563eb";
-                    if (ListView.isCurrentItem && !pane.isActive) return pane.theme ? pane.theme.border : "#3f3f46";
-                    return index % 2 === 0 ? "transparent" : (pane.theme ? pane.theme.rowAlternate : "#1f1f23");
-                }
+            ListView {
+                id: fileList
+                anchors.fill: parent
+                focus: true
 
-                RowLayout {
-                    anchors.fill: parent
-                    anchors.leftMargin: 6
-                    anchors.rightMargin: 6
-                    spacing: 6
+                delegate: Rectangle {
+                    id: fileDelegate
+                    width: fileList.width
+                    height: pane.itemFontSize + 12
+                    radius: 3
+                    
+                    // Подсветка строки, если над ней завис курсор переноса
+                    border.color: (pane.hoveredDropIndex === index) ? "#38bdf8" : "transparent"
+                    border.width: (pane.hoveredDropIndex === index) ? 2 : 0
 
-                    Text {
-                        text: modelData.isDir ? "📁" : "📄"
-                        font.pixelSize: pane.itemFontSize
+                    color: {
+                        if (pane.hoveredDropIndex === index) return "#0369a1";
+                        if (modelData.selected) return "#831843";
+                        if (ListView.isCurrentItem && pane.isActive) return pane.theme ? pane.theme.accentActive : "#2563eb";
+                        if (ListView.isCurrentItem && !pane.isActive) return pane.theme ? pane.theme.border : "#3f3f46";
+                        return index % 2 === 0 ? "transparent" : (pane.theme ? pane.theme.rowAlternate : (palette.alternateBase ? palette.alternateBase : "#1f1f23"));
                     }
 
-                    Text {
-                        text: modelData.name
-                        color: modelData.selected ? "#fbcfe8" : (modelData.isDir ? (pane.theme ? pane.theme.dirColor : "#60a5fa") : (pane.theme ? pane.theme.textPrimary : "#ffffff"))
-                        font.bold: modelData.isDir
-                        font.family: pane.paneFontFamily
-                        font.pixelSize: pane.itemFontSize
-                        elide: Text.ElideRight
-                        Layout.fillWidth: true
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 6
+                        anchors.rightMargin: 6
+                        spacing: 6
+
+                        Text {
+                            text: modelData.isDir ? "📁" : "📄"
+                            font.pixelSize: pane.itemFontSize
+                        }
+
+                        Text {
+                            text: modelData.name
+                            color: modelData.selected ? "#fbcfe8" : (modelData.isDir ? (pane.theme ? pane.theme.dirColor : "#60a5fa") : (pane.theme ? pane.theme.textPrimary : (palette.text ? palette.text : "#ffffff")))
+                            font.bold: modelData.isDir
+                            font.family: pane.paneFontFamily
+                            font.pixelSize: pane.itemFontSize
+                            elide: Text.ElideRight
+                            Layout.fillWidth: true
+                        }
+
+                        Text {
+                            text: modelData.size
+                            color: modelData.selected ? "#fbcfe8" : (pane.theme ? pane.theme.textSecondary : (palette.placeholderText ? palette.placeholderText : "#a1a1aa"))
+                            font.family: pane.paneFontFamily
+                            font.pixelSize: pane.itemFontSize
+                            horizontalAlignment: Text.AlignRight
+                            Layout.preferredWidth: 80
+                        }
+
+                        Text {
+                            text: modelData.modified
+                            color: modelData.selected ? "#fbcfe8" : (pane.theme ? pane.theme.textSecondary : (palette.placeholderText ? palette.placeholderText : "#71717a"))
+                            font.family: pane.paneFontFamily
+                            font.pixelSize: pane.itemFontSize
+                            horizontalAlignment: Text.AlignRight
+                            Layout.preferredWidth: 120
+                        }
                     }
 
-                    Text {
-                        text: modelData.size
-                        color: modelData.selected ? "#fbcfe8" : (pane.theme ? pane.theme.textSecondary : "#a1a1aa")
-                        font.family: pane.paneFontFamily
-                        font.pixelSize: pane.itemFontSize
-                        horizontalAlignment: Text.AlignRight
-                        Layout.preferredWidth: 80
+                    // Плавающий бейдж перетаскивания
+                    Rectangle {
+                        id: dragItem
+                        width: 150
+                        height: 26
+                        radius: 4
+                        color: "#2563eb"
+                        opacity: 0.92
+                        border.color: "#93c5fd"
+                        border.width: 1
+                        visible: rowMouse.drag.active
+                        z: 99999
+
+                        property string title: ""
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: dragItem.title
+                            color: "#ffffff"
+                            font.pixelSize: 11
+                            font.bold: true
+                            elide: Text.ElideMiddle
+                            width: parent.width - 16
+                        }
                     }
 
-                    Text {
-                        text: modelData.modified
-                        color: modelData.selected ? "#fbcfe8" : (pane.theme ? pane.theme.textSecondary : "#71717a")
-                        font.family: pane.paneFontFamily
-                        font.pixelSize: pane.itemFontSize
-                        horizontalAlignment: Text.AlignRight
-                        Layout.preferredWidth: 120
-                    }
-                }
+                    MouseArea {
+                        id: rowMouse
+                        anchors.fill: parent
+                        acceptedButtons: Qt.LeftButton | Qt.RightButton
+                        drag.target: (modelData.name !== "..") ? dragItem : null
 
-                MouseArea {
-                    anchors.fill: parent
-                    acceptedButtons: Qt.LeftButton | Qt.RightButton
-                    onClicked: (mouse) => {
-                        pane.activated();
-                        if (mouse.button === Qt.RightButton) {
-                            if (modelData.name !== "..") {
-                                var m = fileList.model;
-                                m[index].selected = !m[index].selected;
-                                fileList.model = m;
+                        property var originalParent: fileDelegate
+                        property var draggedPaths: []
+
+                        onPressed: (mouse) => {
+                            pane.activated();
+                            if (mouse.button === Qt.LeftButton) {
+                                fileList.currentIndex = index;
+                                if (modelData.name !== "..") {
+                                    var paths = pane.getSelectedOrCurrentPaths();
+                                    if (paths.length === 0) paths = [modelData.path];
+                                    draggedPaths = paths;
+                                    dragItem.title = paths.length > 1 ? ("Файлов: " + paths.length) : modelData.name;
+
+                                    var rootPoint = mapToItem(root.contentItem, mouse.x - 20, mouse.y - 13);
+                                    dragItem.parent = root.contentItem;
+                                    dragItem.x = rootPoint.x;
+                                    dragItem.y = rootPoint.y;
+                                }
                             }
-                        } else {
-                            fileList.currentIndex = index;
                         }
-                    }
-                    onDoubleClicked: {
-                        pane.activated();
-                        if (modelData.isDir) {
-                            pane.loadDir(modelData.path);
-                        } else {
-                            fsManager.openFile(modelData.path);
+
+                        onPositionChanged: (mouse) => {
+                            if (rowMouse.drag.active) {
+                                var windowPt = mapToItem(root.contentItem, mouse.x, mouse.y);
+                                root.checkHoverOverPanes(windowPt.x, windowPt.y);
+                            }
+                        }
+
+                        onReleased: (mouse) => {
+                            if (rowMouse.drag.active || dragItem.parent === root.contentItem) {
+                                var dropPt = mapToItem(root.contentItem, mouse.x, mouse.y);
+                                root.handleDrop(dropPt.x, dropPt.y, draggedPaths);
+                                
+                                dragItem.parent = originalParent;
+                                dragItem.x = 0;
+                                dragItem.y = 0;
+                            }
+                        }
+
+                        onClicked: (mouse) => {
+                            pane.activated();
+                            if (mouse.button === Qt.RightButton) {
+                                if (modelData.name !== "..") {
+                                    var m = fileList.model;
+                                    m[index].selected = !m[index].selected;
+                                    fileList.model = m;
+                                }
+                            }
+                        }
+
+                        onDoubleClicked: {
+                            pane.activated();
+                            if (modelData.isDir) {
+                                pane.loadDir(modelData.path);
+                            } else {
+                                fsManager.openFile(modelData.path);
+                            }
                         }
                     }
                 }
-            }
 
-            Keys.onPressed: (event) => {
-                if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-                    var item = pane.getCurrentItem();
-                    if (item) {
-                        if (item.isDir) pane.loadDir(item.path);
-                        else fsManager.openFile(item.path);
-                    }
-                    event.accepted = true;
-                } else if (event.key === Qt.Key_Backspace) {
-                    var parentPath = pane.currentPath.substring(0, pane.currentPath.lastIndexOf("/"));
-                    if (parentPath === "") parentPath = "/";
-                    pane.loadDir(parentPath);
-                    event.accepted = true;
-                } else if (event.key === Qt.Key_Insert) {
-                    if (fileList.model && fileList.currentIndex >= 0) {
-                        var cur = fileList.model[fileList.currentIndex];
-                        if (cur.name !== "..") {
-                            var arr = fileList.model;
-                            arr[fileList.currentIndex].selected = !arr[fileList.currentIndex].selected;
-                            fileList.model = arr;
+                Keys.onPressed: (event) => {
+                    if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                        var item = pane.getCurrentItem();
+                        if (item) {
+                            if (item.isDir) pane.loadDir(item.path);
+                            else fsManager.openFile(item.path);
                         }
-                        if (fileList.currentIndex < fileList.model.length - 1) {
-                            fileList.currentIndex++;
-                        }
-                    }
-                    event.accepted = true;
-                } else if (event.key === Qt.Key_Space) {
-                    var curItem = pane.getCurrentItem();
-                    if (curItem && curItem.isDir && curItem.name !== "..") {
-                        var sizeStr = fsManager.calculateDirSize(curItem.path);
-                        var copyM = fileList.model;
-                        copyM[fileList.currentIndex].size = sizeStr;
-                        fileList.model = copyM;
                         event.accepted = true;
+                    } else if (event.key === Qt.Key_Backspace) {
+                        var parentPath = pane.currentPath.substring(0, pane.currentPath.lastIndexOf("/"));
+                        if (parentPath === "") parentPath = "/";
+                        pane.loadDir(parentPath);
+                        event.accepted = true;
+                    } else if (event.key === Qt.Key_Insert) {
+                        if (fileList.model && fileList.currentIndex >= 0) {
+                            var cur = fileList.model[fileList.currentIndex];
+                            if (cur.name !== "..") {
+                                var arr = fileList.model;
+                                arr[fileList.currentIndex].selected = !arr[fileList.currentIndex].selected;
+                                fileList.model = arr;
+                            }
+                            if (fileList.currentIndex < fileList.model.length - 1) {
+                                fileList.currentIndex++;
+                            }
+                        }
+                        event.accepted = true;
+                    } else if (event.key === Qt.Key_Space) {
+                        var curItem = pane.getCurrentItem();
+                        if (curItem && curItem.isDir && curItem.name !== "..") {
+                            var sizeStr = fsManager.calculateDirSize(curItem.path);
+                            var copyM = fileList.model;
+                            copyM[fileList.currentIndex].size = sizeStr;
+                            fileList.model = copyM;
+                            event.accepted = true;
+                        }
                     }
                 }
             }
